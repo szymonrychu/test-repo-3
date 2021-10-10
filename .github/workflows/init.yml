@@ -1,0 +1,91 @@
+name: Init Project
+
+on:
+  push:
+    branches:
+      - master
+
+env:
+  GIT_SHA: ${{ github.sha }}
+  GIT_REF: ${{ github.ref }}
+  REPO_NAME: ${{ github.event.repository.name }}
+  REPO_FULL_NAME: ${{ github.event.repository.full_name }}
+
+jobs:
+  build:
+    if: github.event.repository.name != 'chart-template'
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Initialize helm
+      run: |
+        sudo wget https://github.com/mikefarah/yq/releases/download/3.4.0/yq_linux_amd64 -O /usr/bin/yq
+        sudo chmod +x /usr/bin/yq
+        sudo wget https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 -O /usr/bin/jq
+        sudo chmod +x /usr/bin/jq
+        curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
+
+    - name: Create dockerhub repository
+      env:
+        DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
+        DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+      run: |
+        TOKEN=$(curl -s -H "Content-Type: application/json" -X POST -d '{"username": "'${DOCKERHUB_USERNAME}'", "password": "'${DOCKERHUB_PASSWORD}'"}' https://hub.docker.com/v2/users/login/ | jq -r .token)
+        curl -s -H "Authorization: JWT ${TOKEN}" "https://hub.docker.com/v2/repositories/" \
+        --data 'description=test' \
+        --data 'full_description=full-description' \
+        --data 'is_private=false' \
+        --data 'name=test' \
+        --data "namespace=${DOCKERHUB_USERNAME}"
+
+    - name: Create directory structure
+      env:
+        DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
+      run: |
+        mkdir -p ./chart/
+        helm create ./chart/${REPO_NAME}
+        cd ./chart/${REPO_NAME}
+        
+        yq w -i ./Chart.yaml name ${REPO_NAME}
+        
+        yq w -i ./values.yaml image.repository ${DOCKERHUB_NAMESPACE}/${REPO_NAME}
+
+    - name: Create Dockerfile
+      env:
+        DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
+      run: |
+        echo "FROM debian:latest" > ./Dockerfile
+
+    - name: Create CI/CD pipelines
+      env:
+        DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
+      run: |
+        cd .github/workflows
+
+        mv ci.yml_template ci.yml
+        yq w -i ci.yml env.CONTAINER_NAME     ${REPO_NAME}
+        yq w -i ci.yml env.CONTAINER_REGISTRY ${DOCKERHUB_NAMESPACE}
+        yq w -i ci.yml env.CHART_NAME         ${REPO_NAME}
+        yq w -i ci.yml env.CHART_REPOSITORY   ${REPO_FULL_NAME}
+
+        mv cd.yml_template cd.yml
+        yq w -i cd.yml env.CONTAINER_NAME     ${REPO_NAME}
+        yq w -i cd.yml env.CONTAINER_REGISTRY ${DOCKERHUB_NAMESPACE}
+        yq w -i cd.yml env.CHART_NAME         ${REPO_NAME}
+        yq w -i cd.yml env.CHART_REPOSITORY   ${REPO_FULL_NAME}
+
+        rm init.yml
+
+    - name: Update README.md
+      env:
+        DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
+      run: |
+        echo "# ${REPO_NAME}" > README.md
+    
+    - name: Git Commit/Push Changes
+      uses: actions-x/commit@v1
+      with:
+        commit-message: '${{ github.event.repository.name }} initial commit'
